@@ -1,0 +1,230 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 3
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 10s
+      retries: 5
+
+  kong:
+    image: kong:3.6
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /etc/kong/kong.yml
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+    volumes:
+      - ./kong.yml:/etc/kong/kong.yml:ro
+    ports:
+      - "${PUBLIC_API_PORT:-8000}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  verify-address:
+    build:
+      context: ..
+      dockerfile: atomic-services/verify-address/Dockerfile
+    env_file: ${APP_ENV_FILE:-../.env.production}
+    environment:
+      PORT: "8084"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  payment:
+    build:
+      context: ..
+      dockerfile: atomic-services/payment/Dockerfile
+    env_file: ${APP_ENV_FILE:-../.env.production}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  new-orders:
+    build:
+      context: ..
+      dockerfile: atomic-services/new-orders/Dockerfile
+    env_file: ${APP_ENV_FILE:-../.env.production}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  order-fulfilment:
+    build:
+      context: ..
+      dockerfile: composite-services/order-fulfilment/Dockerfile
+    env_file: ${APP_ENV_FILE:-../.env.production}
+    environment:
+      NEW_ORDERS_URL: ${OUTSYSTEMS_NEWORDERS_URL}
+      PAYMENT_URL: http://payment:8089
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  kitchen-assignment:
+    build:
+      context: ..
+      dockerfile: atomic-services/kitchen-assignment/Dockerfile
+    env_file: ${APP_ENV_FILE:-../.env.production}
+    restart: unless-stopped
+
+  kitchen-operations:
+    build:
+      context: ..
+      dockerfile: composite-services/kitchen-operations/Dockerfile
+    env_file: ${APP_ENV_FILE:-../.env.production}
+    environment:
+      PYTHONUNBUFFERED: "1"
+      KITCHEN_ASSIGNMENT_URL: http://kitchen-assignment:8091
+      NEW_ORDERS_URL: ${OUTSYSTEMS_NEWORDERS_URL}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-10}"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      kitchen-assignment:
+        condition: service_started
+      new-orders:
+        condition: service_started
+    restart: unless-stopped
+
+  order-processor:
+    build:
+      context: ..
+      dockerfile: composite-services/order-processor/Dockerfile
+    env_file: ${APP_ENV_FILE:-../.env.production}
+    environment:
+      PYTHONUNBUFFERED: "1"
+      NEW_ORDERS_URL: ${OUTSYSTEMS_NEWORDERS_URL}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-10}"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      new-orders:
+        condition: service_started
+    restart: unless-stopped
+
+  eta-calculator:
+    build:
+      context: ../atomic-services/etaCalculator
+    env_file: ${APP_ENV_FILE:-../.env.production}
+    environment:
+      PORT: "8088"
+    restart: unless-stopped
+
+  eta-tracking:
+    build:
+      context: ..
+      dockerfile: composite-services/etaTracking/Dockerfile
+    env_file: ${APP_ENV_FILE:-../.env.production}
+    environment:
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ""
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      ETA_CALCULATION_URL: http://eta-calculator:8088
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  assign-driver:
+    build:
+      context: ..
+      dockerfile: composite-services/assign-driver/Dockerfile
+    env_file: ${APP_ENV_FILE:-../.env.production}
+    environment:
+      NEW_ORDERS_URL: ${OUTSYSTEMS_NEWORDERS_URL}
+      ETA_TRACKING_URL: http://eta-tracking:8087
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ""
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      eta-tracking:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  notifications:
+    build:
+      context: ..
+      dockerfile: atomic-services/notifications/Dockerfile
+    env_file: ${APP_ENV_FILE:-../.env.production}
+    environment:
+      PYTHONUNBUFFERED: "1"
+      FIREBASE_SERVICE_ACCOUNT_PATH: /secrets/firebase-service-account.json
+    volumes:
+      - ${FIREBASE_SERVICE_ACCOUNT_FILE:-../firebase-service-account.json}:/secrets/firebase-service-account.json:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  order-web:
+    build:
+      context: ../UI/OrderUI
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${PUBLIC_ORDER_UI_PORT:-8080}:80"
+    depends_on:
+      kong:
+        condition: service_started
+    restart: unless-stopped
+
+  kitchen-web:
+    build:
+      context: ../UI/KitchenUI
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${PUBLIC_KITCHEN_UI_PORT:-8083}:80"
+    depends_on:
+      kong:
+        condition: service_started
+    restart: unless-stopped
+
+  rider-web:
+    build:
+      context: ../UI/RiderUI
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${PUBLIC_RIDER_UI_PORT:-8085}:80"
+    depends_on:
+      kong:
+        condition: service_started
+    restart: unless-stopped

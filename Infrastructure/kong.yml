@@ -1,0 +1,139 @@
+_format_version: "3.0"
+
+services:
+  #Change port number accordingly, if you change one, please check for overlaps
+  # Scenario 1
+- name: menu
+  url: https://personal-dkkhoptv.outsystemscloud.com/MenuService/rest/MenuService/Menu #has to be hard coded unfortunately
+  routes:
+    - name: menu-routes
+      paths:
+        - /api/v1/menu
+      methods: ["GET"]
+
+- name: order-fulfilment
+  url: http://order-fulfilment:8081
+  routes:
+    - name: order-fulfilment-routes
+      paths:
+        - /api/v1/order/submit
+      methods: ["POST", "OPTIONS"]
+      strip_path: false
+    - name: order-fulfilment-tracking-routes
+      paths:
+        - /api/v1/order
+      methods: ["GET"]
+      strip_path: false
+
+- name: verify-address
+  url: http://verify-address:8084
+  routes:
+    - name: verify-address-routes
+      paths:
+        - /api/v1/verify
+      methods: ["GET", "OPTIONS"]
+      strip_path: false
+
+- name: payment
+  url: http://payment:8089
+  routes:
+    - name: payment-routes
+      paths:
+        - /api/v1/payment
+      methods: ["POST", "GET", "OPTIONS"]
+      strip_path: false
+
+  # Scenario 2
+  # kitchen-operations is a background poller only (no HTTP API for listing orders).
+  # Kitchen UI talks to order-processor through Kong at /api/v1/kitchen/*.
+
+- name: kitchen-coordinate
+  url: http://order-processor:8094
+  routes:
+    - name: kitchen-coordinate-routes
+      paths:
+        - /api/v1/kitchen
+      methods: [ "GET", "PUT", "OPTIONS" ]
+      strip_path: false
+
+- name: kitchen-operations-health
+  url: http://kitchen-operations:8093
+  routes:
+    - name: kitchen-operations-health-routes
+      paths:
+        - /api/v1/kitchen-assign/health
+      methods: [ "GET", "OPTIONS" ]
+      strip_path: false
+
+  # Scenario 3
+
+- name: assign-driver
+  url: http://assign-driver:8086
+  routes:
+    - name: assign-driver-routes
+      paths:
+        - /api/v1/driver/assign
+        - /api/v1/driver/pickup
+        - /api/v1/driver/deliver
+        - /api/v1/driver/orders
+      methods: ["GET", "PUT", "OPTIONS"]
+      strip_path: false
+
+#- name: driver-location
+#  url: http://driver-location:8087
+#  routes:
+#    - name: driver-location-routes
+#      paths:
+#        - /api/v1/driver/location
+#        - /api/v1/driver/nearby
+#      methods: ["POST", "GET"]
+
+- name: eta-tracking
+  url: http://eta-tracking:8087
+  routes:
+    - name: eta-tracking-routes
+      paths:
+        - /api/v1/eta
+      methods: ["GET", "POST", "OPTIONS"]
+      strip_path: false
+
+  # Notification
+- name: notification-service
+  url: http://notifications:8090
+  routes:
+    - name: notification-route
+      paths:
+        - /api/notifications
+      strip_path: false
+
+plugins:
+
+- name: rate-limiting
+  config:
+    minute: 120 #limits to 120 req per min (can change depending on usage)
+    policy: redis
+    redis:
+      host: redis
+      port: 6379
+      # Do not send Redis AUTH unless Redis is configured with a password
+
+- name: cors
+  config:
+    origins:
+      - "http://localhost:3000"
+      - "http://localhost:5173"
+      - "http://localhost:5174"
+      - "http://localhost:5175"
+      #i assume we are gonna use vite, change to 3000 if using react app or smt
+    methods:
+      - GET
+      - POST
+      - PUT
+      - DELETE #remove if not needed
+      - OPTIONS #needed for cors check
+    headers:
+      - Content-Type #for json request parsing
+      - Authorization #auth tokens
+      - X-Driver-ID #custom header to identify driver
+    max_age: 3600 #cache preflight response for 1 hour
+    credentials: true #works with authorization header for JWT/cookies
